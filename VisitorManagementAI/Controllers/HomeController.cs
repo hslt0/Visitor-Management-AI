@@ -1,24 +1,23 @@
-using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
-using VisitorManagementAI.Models;
+using VisitorManagementAI.Services;
 
 namespace VisitorManagementAI.Controllers;
 
-public class HomeController : Controller
+public class HomeController(IVisitorQueryService queryService) : Controller
 {
     public IActionResult Index()
     {
         return View();
     }
-
-    public IActionResult Privacy()
+    
+    [HttpPost("/api/home/ask")]
+    public async Task<IActionResult> Ask([FromBody] ChatRequest request)
     {
-        return View();
-    }
+        if (string.IsNullOrEmpty(request.Prompt)) return BadRequest("Prompt is empty");
 
-    [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
-    public IActionResult Error()
-    {
-        return View(new ErrorViewModel { RequestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier });
+        var response = await queryService.ChatAsync(request.Prompt);
+        return Ok(new { answer = response });
     }
 }
+
+public record ChatRequest(string Prompt);
