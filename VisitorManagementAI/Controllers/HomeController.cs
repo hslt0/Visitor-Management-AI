@@ -15,7 +15,7 @@ public class HomeController(IVisitorQueryService queryService) : Controller
     {
         if (string.IsNullOrEmpty(request.Prompt)) return BadRequest("Prompt is empty");
 
-        var response = await queryService.ChatAsync(request.Prompt);
+        var response = await queryService.ChatAsync(request.Prompt, 1001);
         return Ok(new { answer = response });
     }
 }
