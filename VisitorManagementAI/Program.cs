@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using VisitorManagementAI.Data;
+using VisitorManagementAI.Models;
 using VisitorManagementAI.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -8,10 +9,16 @@ builder.Services.AddControllersWithViews();
 
 builder.Services.AddSingleton<IVisitorQueryService, OnnxVisitorQueryService>();
 
+builder.Services.AddScoped<VisitorTools>();
+
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
     options.UseSqlite(builder.Configuration.GetConnectionString("DefaultConnection"));
 });
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<VisitorTools>();
 
 var app = builder.Build();
 
