@@ -1,7 +1,7 @@
-﻿using Microsoft.EntityFrameworkCore;
-using VisitorManagementAI.Models;
+﻿using MCPServer.Models;
+using Microsoft.EntityFrameworkCore;
 
-namespace VisitorManagementAI.Data;
+namespace MCPServer.Data;
 
 public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
 {

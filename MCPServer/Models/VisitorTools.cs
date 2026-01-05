@@ -1,23 +1,24 @@
 ﻿using System.ComponentModel;
 using System.Text.Json;
+using MCPServer.Data;
 using Microsoft.EntityFrameworkCore;
 using ModelContextProtocol.Server;
-using VisitorManagementAI.Data;
 
-namespace VisitorManagementAI.Models;
+namespace MCPServer.Models;
 
 [McpServerToolType]
 public class VisitorTools(AppDbContext db)
 {
-    [McpServerTool, Description("Finds visitors by their name or license plate number. Returns a list of matches.")]
+    [McpServerTool, Description("Finds visitors by name or plate. Input MUST be ONLY the name (e.g., 'Alex') or plate (e.g., 'ABC123') without extra words.")]
     public async Task<string> FindVisitor(string query, int siteId)
     {
+        query = query.Trim();
         var visitors = await db.Checkins
             .Where(c => c.SiteId == siteId &&
                         c.VisitorName != null &&
                         (c.VisitorVehicleRegistrationPlate == query || c.VisitorName.Contains(query)))
             .OrderByDescending(c => c.CheckinTimestamp)
-            .Take(5) // Беремо до 5 збігів
+            .Take(5)
             .Select(c => new { c.VisitorName, c.VisitorCustomOne, c.CheckinTimestamp, c.VisitorVehicleRegistrationPlate })
             .ToListAsync();
 

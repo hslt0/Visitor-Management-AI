@@ -1,3 +1,5 @@
 <Solution>
+  <Project Path="AppHost/AppHost.csproj" />
+  <Project Path="MCPServer/MCPServer.csproj" />
   <Project Path="VisitorManagementAI/VisitorManagementAI.csproj" />
 </Solution>

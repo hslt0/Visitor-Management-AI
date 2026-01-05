@@ -1,7 +1,8 @@
 ﻿using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Net.Http.Headers;
 using Microsoft.ML.OnnxRuntimeGenAI;
-using VisitorManagementAI.Models;
 
 namespace VisitorManagementAI.Services;
 
@@ -14,12 +15,15 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 {
     private readonly Model _model;
     private readonly Tokenizer _tokenizer;
-    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly string _mcpUrl;
 
-    public OnnxVisitorQueryService(IConfiguration config, IServiceScopeFactory scopeFactory)
+    public OnnxVisitorQueryService(IConfiguration config, IHttpClientFactory httpClientFactory)
     {
-        _scopeFactory = scopeFactory;
-        var modelPath = config["AiSettings:ModelPath"] ?? throw new InvalidOperationException();
+        _httpClientFactory = httpClientFactory;
+        var baseUrl = config["McpServerUrl"] ?? config["AiSettings:McpUrl"];
+        _mcpUrl = baseUrl?.TrimEnd('/') + "/api/mcp";
+        var modelPath = config["AiSettings:ModelPath"] ?? throw new InvalidOperationException("Model path not configured.");
         _model = new Model(Path.GetFullPath(modelPath));
         _tokenizer = new Tokenizer(_model);
     }
@@ -29,49 +33,102 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
         var now = DateTime.Now.ToString("f");
 
         var toolsDescription = """
-                               Available tools:
                                - find_visitor(query: string): Search by name or license plate.
                                - get_unit_visitors(unit: string): List everyone in a specific unit.
                                """;
 
         var systemPrompt = $"""
-                            Instruction: You are a security assistant with real-time access to the system clock.
-                            The current date and time is strictly: {now}.
+                            You are a helpful and polite security assistant. Current time: {now}.
 
                             {toolsDescription}
 
-                            RULES:
-                            1. NEVER claim you do not know the date. You MUST use the date provided above.
-                            2. If a user asks for the date, state it clearly as {now}.
-                            3. For visitor lookups, ONLY reply with: [CALL: tool_name(parameter="value")]
+                            GUIDELINES:
+                            1. You can chat naturally (say hello, answer general questions).
+                            2. If the user asks about visitors, units, or people, YOU MUST use: [CALL: tool_name(parameter="value")]
+                            3. Use the current year 2026 for all time calculations.
+
+                            IMPORTANT PARAMETER RULES:
+                            - The 'query' parameter must contain ONLY the Name or License Plate.
+                            - DO NOT include words like "check", "search", "last visit", "who is".
+
+                            EXAMPLES:
+                            - User: "When was Alex here?" -> [CALL: find_visitor(query="Alex")]
+                            - User: "Check plate ABC123" -> [CALL: find_visitor(query="ABC123")]
+                            - User: "Who visited unit 505?" -> [CALL: get_unit_visitors(unit="505")]
                             """;
 
         var firstResponse = await RunInferenceAsync(userPrompt, systemPrompt);
 
-        var match = Regex.Match(firstResponse, @"\[CALL:\s*([a-zA-Z0-9__]+)\s*\(\s*(?:.*?=)?\s*""?([^""]+)""?\s*\)\]");
+        var match = Regex.Match(firstResponse, @"\[CALL:\s*([a-zA-Z0-9__]+)\s*\(\s*(?:.*?=)?\s*(.*)\s*\)\]");
 
         if (!match.Success) return firstResponse;
-        
-        var functionName = match.Groups[1].Value.ToLower();
-        var queryValue = match.Groups[2].Value;
 
-        using var scope = _scopeFactory.CreateScope();
-        var visitorTools = scope.ServiceProvider.GetRequiredService<VisitorTools>();
-        
-        var toolResult = "";
-        if (functionName.Contains("unit_visitors"))
+        var toolName = match.Groups[1].Value;
+        var rawValue = match.Groups[2].Value;
+
+        var queryValue = rawValue.Trim().Trim('"', '\'');
+
+        Console.WriteLine($"[DEBUG] Tool: {toolName}, Query: '{queryValue}'");
+
+        var requestBody = new
         {
-            toolResult = await visitorTools.GetUnitVisitors(queryValue, siteId);
-        }
-        else if (functionName.Contains("find_visitor"))
+            jsonrpc = "2.0",
+            method = "tools/call",
+            @params = new
+            {
+                name = toolName,
+                arguments = new Dictionary<string, object>
+                {
+                    { toolName.Contains("unit") ? "unit" : "query", queryValue },
+                    { "siteId", siteId }
+                }
+            },
+            id = Guid.NewGuid().ToString()
+        };
+
+        using var client = _httpClientFactory.CreateClient();
+        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+
+        try
         {
-            toolResult = await visitorTools.FindVisitor(queryValue, siteId);
+            var response = await client.PostAsJsonAsync(_mcpUrl, requestBody);
+            var jsonResponse = await response.Content.ReadAsStringAsync();
+            var toolResult = ExtractMcpContent(jsonResponse);
+
+            if (string.IsNullOrEmpty(toolResult)) return firstResponse;
+
+            var finalPrompt = $"User: {userPrompt}. Database result: {toolResult}. Summarize naturally for the user.";
+            return await RunInferenceAsync(finalPrompt, "You are a helpful security assistant.");
         }
+        catch (Exception ex)
+        {
+            return $"I encountered a connection error: {ex.Message}";
+        }
+    }
 
-        if (string.IsNullOrEmpty(toolResult)) return firstResponse;
-        var finalPrompt = $"User: {userPrompt}. Database: {toolResult}. Summarize naturally.";
-        return await RunInferenceAsync(finalPrompt, "You are a helpful security assistant.");
+    private string ExtractMcpContent(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
 
+            if (root.TryGetProperty("error", out var error))
+            {
+                return $"Error from server: {error.GetProperty("message").GetString()}";
+            }
+
+            if (root.TryGetProperty("result", out var result) && 
+                result.TryGetProperty("content", out var content) && 
+                content.GetArrayLength() > 0)
+            {
+                return content[0].GetProperty("text").GetString() ?? "No data returned.";
+            }
+        }
+        catch { /* Fallback to raw JSON if parsing fails */ }
+        
+        return json;
     }
 
     private async Task<string> RunInferenceAsync(string prompt, string systemMessage)

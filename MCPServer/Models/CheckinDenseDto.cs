@@ -1,4 +1,4 @@
-﻿namespace VisitorManagementAI.Models;
+﻿namespace MCPServer.Models;
 
 /// <summary>
 /// Dense, query-friendly subset of CheckinDto.
