@@ -1,7 +1,5 @@
 ﻿using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Net.Http.Headers;
 using Microsoft.ML.OnnxRuntimeGenAI;
 
 namespace VisitorManagementAI.Services;
@@ -15,14 +13,16 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 {
     private readonly Model _model;
     private readonly Tokenizer _tokenizer;
-    private readonly IHttpClientFactory _httpClientFactory;
-    private readonly string _mcpUrl;
+    private readonly IMcpClient _mcpClient;
+    private readonly ILogger<OnnxVisitorQueryService> _logger;
 
-    public OnnxVisitorQueryService(IConfiguration config, IHttpClientFactory httpClientFactory)
+    private static readonly Regex ToolCallRegex = new(@"\[CALL:\s*([a-zA-Z0-9_]+)\s*\(\s*(?:.*?=)?\s*(.*)\s*\)\]", RegexOptions.Compiled);
+
+    public OnnxVisitorQueryService(IConfiguration config, IMcpClient mcpClient, ILogger<OnnxVisitorQueryService> logger)
     {
-        _httpClientFactory = httpClientFactory;
-        var baseUrl = config["McpServerUrl"] ?? config["AiSettings:McpUrl"];
-        _mcpUrl = baseUrl?.TrimEnd('/') + "/api/mcp";
+        _mcpClient = mcpClient;
+        _logger = logger;
+        
         var modelPath = config["AiSettings:ModelPath"] ?? throw new InvalidOperationException("Model path not configured.");
         _model = new Model(Path.GetFullPath(modelPath));
         _tokenizer = new Tokenizer(_model);
@@ -30,170 +30,55 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 
     public async Task<string> ChatAsync(string userPrompt, int siteId)
     {
-        var now = DateTime.Now.ToString("f");
-        
-        var toolsDescription = await FetchToolsInstructionAsync();
+        var toolsDescription = await _mcpClient.GetToolsDescriptionAsync();
+        if (string.IsNullOrEmpty(toolsDescription))
+        {
+             toolsDescription = "- find_visitor(query: string): Search by name/plate.\n- get_unit_visitors(unit: string): Search unit.";
+        }
 
-        var systemPrompt = $"""
-                            You are a security assistant. Current time: {now}.
-
-                            AVAILABLE TOOLS:
-                            {toolsDescription}
-
-                            CRITICAL RULES:
-                            1. USE ONLY THE EXACT TOOL NAMES from the list above.
-                            2. The tool for searching visitors is 'find_visitor'.
-                            3. The tool for checking unit residents is 'get_unit_visitors'.
-                            4. NEVER invent names like 'check_unit_members'.
-
-                            EXAMPLES:
-                            - User: "Who is in unit 505?" 
-                              Assistant: [CALL: get_unit_visitors(unit="505")]
-
-                            - User: "Find Alex"
-                              Assistant: [CALL: find_visitor(query="Alex")]
-                            """;
+        var systemPrompt = BuildSystemPrompt(toolsDescription);
 
         var firstResponse = await RunInferenceAsync(userPrompt, systemPrompt);
 
-        var match = Regex.Match(firstResponse, @"\[CALL:\s*([a-zA-Z0-9__]+)\s*\(\s*(?:.*?=)?\s*(.*)\s*\)\]");
-
+        var match = ToolCallRegex.Match(firstResponse);
         if (!match.Success) return firstResponse;
 
-        var toolName = match.Groups[1].Value;
-        var rawValue = match.Groups[2].Value;
-        var queryValue = rawValue.Trim().Trim('"', '\'');
-
-        Console.WriteLine($"[DEBUG] Tool: {toolName}, Query: '{queryValue}'");
-
-        var paramName = "query"; 
-        if (toolName.Contains("unit")) paramName = "unit"; 
+        var (toolName, queryValue) = ParseAndCorrectToolCall(match);
         
-        var requestBody = new
-        {
-            jsonrpc = "2.0",
-            method = "tools/call",
-            @params = new
-            {
-                name = toolName,
-                arguments = new Dictionary<string, object>
-                {
-                    { paramName, queryValue },
-                    { "siteId", siteId }
-                }
-            },
-            id = Guid.NewGuid().ToString()
-        };
+        _logger.LogInformation("AI requesting tool: {Tool} with query: {Query}", toolName, queryValue);
 
-        using var client = _httpClientFactory.CreateClient();
-        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+        var toolResult = await _mcpClient.CallToolAsync(toolName, queryValue, siteId);
 
-        try
-        {
-            var response = await client.PostAsJsonAsync(_mcpUrl, requestBody);
-            var jsonResponse = await response.Content.ReadAsStringAsync();
-            var toolResult = ExtractMcpContent(jsonResponse);
-
-            if (string.IsNullOrEmpty(toolResult)) return firstResponse;
-
-            var finalPrompt = $"User: {userPrompt}. Database result: {toolResult}. Summarize naturally for the user.";
-            return await RunInferenceAsync(finalPrompt, "You are a helpful security assistant.");
-        }
-        catch (Exception ex)
-        {
-            return $"Connection error: {ex.Message}";
-        }
+        var finalPrompt = $"User asked: {userPrompt}. Database result: {toolResult}. Summarize naturally.";
+        return await RunInferenceAsync(finalPrompt, "You are a helpful security assistant.");
     }
 
-    private async Task<string> FetchToolsInstructionAsync()
+    private (string toolName, string queryValue) ParseAndCorrectToolCall(Match match)
     {
-        try
-        {
-            var requestBody = new
-            {
-                jsonrpc = "2.0",
-                method = "tools/list",
-                @params = new { }, 
-                id = 1 
-            };
-
-            using var client = _httpClientFactory.CreateClient();
-            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
-            
-            var response = await client.PostAsJsonAsync(_mcpUrl, requestBody);
-            
-            if (!response.IsSuccessStatusCode) return string.Empty;
-
-            var json = await response.Content.ReadAsStringAsync();
-            using var doc = JsonDocument.Parse(json);
-            
-            Console.WriteLine($"[DEBUG] RAW TOOLS JSON: {json}");
-            
-            if (doc.RootElement.TryGetProperty("result", out var result) && 
-                result.TryGetProperty("tools", out var tools))
-            {
-                var sb = new StringBuilder();
-                foreach (var tool in tools.EnumerateArray())
-                {
-                    var name = tool.GetProperty("name").GetString();
-                    var desc = tool.GetProperty("description").GetString();
-                    
-                    var paramName = "query"; 
-                    if (tool.TryGetProperty("inputSchema", out var schema) && 
-                        schema.TryGetProperty("properties", out var props))
-                    {
-                        foreach (var prop in props.EnumerateObject())
-                        {
-                            if (prop.Name == "siteId") continue;
-                            
-                            paramName = prop.Name;
-                        }
-                    }
-
-                    sb.AppendLine($"- {name}({paramName}: string): {desc}");
-                }
-                
-                var finalString = sb.ToString();
-                
-                Console.WriteLine($"[DEBUG] PARSED TOOLS INSTRUCTION:\n{finalString}");
-                
-                return finalString;
-            }
-        }
-        catch 
-        {
-            return string.Empty;
-        }
-        return string.Empty;
+        var toolName = match.Groups[1].Value;
+        var queryValue = match.Groups[2].Value.Trim().Trim('"', '\'');
+        
+        return (toolName, queryValue);
     }
 
-    private string ExtractMcpContent(string json)
+    private string BuildSystemPrompt(string toolsDescription)
     {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
+        return $"""
+                You are a security assistant. Current time: {DateTime.Now:f}.
 
-            if (root.TryGetProperty("error", out var error))
-            {
-                return $"Error: {error.GetProperty("message").GetString()}";
-            }
+                AVAILABLE TOOLS:
+                {toolsDescription}
 
-            if (root.TryGetProperty("result", out var result) && 
-                result.TryGetProperty("content", out var content) && 
-                content.GetArrayLength() > 0)
-            {
-                return content[0].GetProperty("text").GetString() ?? "No data.";
-            }
-        }
-        catch
-        {
-            // ignored
-        }
-
-        return json;
+                CRITICAL RULES:
+                1. USE ONLY THE EXACT TOOL NAMES from the list above.
+                2. The tool for searching visitors is 'find_visitor'.
+                3. The tool for checking unit residents is 'get_unit_visitors'.
+                4. NEVER invent names like 'check_unit_members'.
+                
+                EXAMPLES:
+                - User: "Who is in unit 505?" -> Assistant: [CALL: get_unit_visitors(unit="505")]
+                - User: "Find Alex" -> Assistant: [CALL: find_visitor(query="Alex")]
+                """;
     }
 
     private async Task<string> RunInferenceAsync(string prompt, string systemMessage)
@@ -205,7 +90,7 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 
             using var sequences = _tokenizer.Encode(fullPrompt);
             using var generatorParams = new GeneratorParams(_model);
-            generatorParams.SetSearchOption("max_length", 4096);
+            generatorParams.SetSearchOption("max_length", 2048);
             generatorParams.SetInputSequences(sequences);
 
             using var tokenizerStream = _tokenizer.CreateStream();
@@ -228,5 +113,6 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
     {
         _tokenizer.Dispose();
         _model.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
