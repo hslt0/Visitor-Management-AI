@@ -18,7 +18,13 @@ builder.Services.AddCors(options =>
     });
 });
 
-builder.Services.AddMcpServer()
+builder.Services.AddMcpServer(options =>
+    {
+        options.ServerInfo?.Name = "mcp-server";
+        options.ServerInfo?.Version = "0.0.1";
+        options.ServerInfo?.Title =  "MCP Server";
+        options.Capabilities?.Tools?.ListChanged = true;
+    })
     .WithHttpTransport()
     .WithToolsFromAssembly();
 

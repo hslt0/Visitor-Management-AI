@@ -31,30 +31,27 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
     public async Task<string> ChatAsync(string userPrompt, int siteId)
     {
         var now = DateTime.Now.ToString("f");
-
-        var toolsDescription = """
-                               - find_visitor(query: string): Search by name or license plate.
-                               - get_unit_visitors(unit: string): List everyone in a specific unit.
-                               """;
+        
+        var toolsDescription = await FetchToolsInstructionAsync();
 
         var systemPrompt = $"""
-                            You are a helpful and polite security assistant. Current time: {now}.
+                            You are a security assistant. Current time: {now}.
 
+                            AVAILABLE TOOLS:
                             {toolsDescription}
 
-                            GUIDELINES:
-                            1. You can chat naturally (say hello, answer general questions).
-                            2. If the user asks about visitors, units, or people, YOU MUST use: [CALL: tool_name(parameter="value")]
-                            3. Use the current year 2026 for all time calculations.
-
-                            IMPORTANT PARAMETER RULES:
-                            - The 'query' parameter must contain ONLY the Name or License Plate.
-                            - DO NOT include words like "check", "search", "last visit", "who is".
+                            CRITICAL RULES:
+                            1. USE ONLY THE EXACT TOOL NAMES from the list above.
+                            2. The tool for searching visitors is 'find_visitor'.
+                            3. The tool for checking unit residents is 'get_unit_visitors'.
+                            4. NEVER invent names like 'check_unit_members'.
 
                             EXAMPLES:
-                            - User: "When was Alex here?" -> [CALL: find_visitor(query="Alex")]
-                            - User: "Check plate ABC123" -> [CALL: find_visitor(query="ABC123")]
-                            - User: "Who visited unit 505?" -> [CALL: get_unit_visitors(unit="505")]
+                            - User: "Who is in unit 505?" 
+                              Assistant: [CALL: get_unit_visitors(unit="505")]
+
+                            - User: "Find Alex"
+                              Assistant: [CALL: find_visitor(query="Alex")]
                             """;
 
         var firstResponse = await RunInferenceAsync(userPrompt, systemPrompt);
@@ -65,11 +62,13 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 
         var toolName = match.Groups[1].Value;
         var rawValue = match.Groups[2].Value;
-
         var queryValue = rawValue.Trim().Trim('"', '\'');
 
         Console.WriteLine($"[DEBUG] Tool: {toolName}, Query: '{queryValue}'");
 
+        var paramName = "query"; 
+        if (toolName.Contains("unit")) paramName = "unit"; 
+        
         var requestBody = new
         {
             jsonrpc = "2.0",
@@ -79,7 +78,7 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
                 name = toolName,
                 arguments = new Dictionary<string, object>
                 {
-                    { toolName.Contains("unit") ? "unit" : "query", queryValue },
+                    { paramName, queryValue },
                     { "siteId", siteId }
                 }
             },
@@ -103,8 +102,71 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
         }
         catch (Exception ex)
         {
-            return $"I encountered a connection error: {ex.Message}";
+            return $"Connection error: {ex.Message}";
         }
+    }
+
+    private async Task<string> FetchToolsInstructionAsync()
+    {
+        try
+        {
+            var requestBody = new
+            {
+                jsonrpc = "2.0",
+                method = "tools/list",
+                @params = new { }, 
+                id = 1 
+            };
+
+            using var client = _httpClientFactory.CreateClient();
+            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
+            
+            var response = await client.PostAsJsonAsync(_mcpUrl, requestBody);
+            
+            if (!response.IsSuccessStatusCode) return string.Empty;
+
+            var json = await response.Content.ReadAsStringAsync();
+            using var doc = JsonDocument.Parse(json);
+            
+            Console.WriteLine($"[DEBUG] RAW TOOLS JSON: {json}");
+            
+            if (doc.RootElement.TryGetProperty("result", out var result) && 
+                result.TryGetProperty("tools", out var tools))
+            {
+                var sb = new StringBuilder();
+                foreach (var tool in tools.EnumerateArray())
+                {
+                    var name = tool.GetProperty("name").GetString();
+                    var desc = tool.GetProperty("description").GetString();
+                    
+                    var paramName = "query"; 
+                    if (tool.TryGetProperty("inputSchema", out var schema) && 
+                        schema.TryGetProperty("properties", out var props))
+                    {
+                        foreach (var prop in props.EnumerateObject())
+                        {
+                            if (prop.Name == "siteId") continue;
+                            
+                            paramName = prop.Name;
+                        }
+                    }
+
+                    sb.AppendLine($"- {name}({paramName}: string): {desc}");
+                }
+                
+                var finalString = sb.ToString();
+                
+                Console.WriteLine($"[DEBUG] PARSED TOOLS INSTRUCTION:\n{finalString}");
+                
+                return finalString;
+            }
+        }
+        catch 
+        {
+            return string.Empty;
+        }
+        return string.Empty;
     }
 
     private string ExtractMcpContent(string json)
@@ -116,18 +178,21 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 
             if (root.TryGetProperty("error", out var error))
             {
-                return $"Error from server: {error.GetProperty("message").GetString()}";
+                return $"Error: {error.GetProperty("message").GetString()}";
             }
 
             if (root.TryGetProperty("result", out var result) && 
                 result.TryGetProperty("content", out var content) && 
                 content.GetArrayLength() > 0)
             {
-                return content[0].GetProperty("text").GetString() ?? "No data returned.";
+                return content[0].GetProperty("text").GetString() ?? "No data.";
             }
         }
-        catch { /* Fallback to raw JSON if parsing fails */ }
-        
+        catch
+        {
+            // ignored
+        }
+
         return json;
     }
 
