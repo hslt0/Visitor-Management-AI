@@ -1,7 +1,7 @@
 ﻿using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.ML.OnnxRuntimeGenAI;
-using VisitorManagementAI.Models;
+using VisitorManagementAI.Utilities;
 
 namespace VisitorManagementAI.Services;
 
@@ -30,11 +30,13 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 
     public async Task<string> ChatAsync(string userPrompt, int siteId)
     {
+        var now = DateTime.Now.ToString("F", System.Globalization.CultureInfo.InvariantCulture);
+        
         var toolsDescription = await _mcpClient.GetToolsDescriptionAsync();
         
         _logger.LogInformation("Tools description AI got: " + toolsDescription);
 
-        var systemPrompt = BuildSystemPrompt(toolsDescription);
+        var systemPrompt = BuildSystemPrompt(toolsDescription, now);
         
         _logger.LogInformation("System prompt: " + systemPrompt);
 
@@ -48,9 +50,21 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
         
         _logger.LogInformation("AI requesting tool: {Tool} with query: {Query}", toolName, queryValue);
 
-        var toolResult = await _mcpClient.CallToolAsync(toolName, queryValue, siteId);
+        var rawJsonResult = await _mcpClient.CallToolAsync(toolName, queryValue, siteId);
+        
+        var humanReadableData = AiUtilities.FormatJsonForAi(rawJsonResult);
 
-        var finalPrompt = $"User asked: {userPrompt}. Database result: {toolResult}. Summarize naturally.";
+        var finalPrompt = $"""
+                           Current System Time: {now}
+
+                           Original Question: "{userPrompt}"
+                           Database Data:
+                           {humanReadableData}
+
+                           Instruction: Summarize the data naturally for the user. 
+                           Use the 'Current System Time' to correctly say 'today', 'yesterday', or 'last week'.
+                           """;
+        
         return await RunInferenceAsync(finalPrompt, "You are a helpful security assistant.");
     }
 
@@ -70,7 +84,7 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
             .Select(validName => new 
             { 
                 Name = validName, 
-                Distance = StringDistance.Calculate(aiGeneratedName, validName) 
+                Distance = AiUtilities.CalculateDistance(aiGeneratedName, validName) 
             })
             .OrderBy(x => x.Distance)
             .First();
@@ -81,10 +95,8 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
         return (bestMatch.Name, queryValue);
     }
 
-    private string BuildSystemPrompt(string toolsDescription)
+    private string BuildSystemPrompt(string toolsDescription, string now)
     {
-        var now = DateTime.Now.ToString("F", System.Globalization.CultureInfo.InvariantCulture);
-        
         return $"""
                 You are a visitor management assistant connected to a real-time system. Current time: {now}.
                 (Use this EXACT time/date for all user questions like "what day is it" or "what time is it").
