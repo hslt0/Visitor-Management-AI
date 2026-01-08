@@ -1,6 +1,7 @@
 ﻿using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.ML.OnnxRuntimeGenAI;
+using VisitorManagementAI.Models;
 
 namespace VisitorManagementAI.Services;
 
@@ -22,7 +23,6 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
     {
         _mcpClient = mcpClient;
         _logger = logger;
-        
         var modelPath = config["AiSettings:ModelPath"] ?? throw new InvalidOperationException("Model path not configured.");
         _model = new Model(Path.GetFullPath(modelPath));
         _tokenizer = new Tokenizer(_model);
@@ -31,14 +31,15 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
     public async Task<string> ChatAsync(string userPrompt, int siteId)
     {
         var toolsDescription = await _mcpClient.GetToolsDescriptionAsync();
-        if (string.IsNullOrEmpty(toolsDescription))
-        {
-             toolsDescription = "- find_visitor(query: string): Search by name/plate.\n- get_unit_visitors(unit: string): Search unit.";
-        }
+        
+        _logger.LogInformation("Tools description AI got: " + toolsDescription);
 
         var systemPrompt = BuildSystemPrompt(toolsDescription);
+        
+        _logger.LogInformation("System prompt: " + systemPrompt);
 
         var firstResponse = await RunInferenceAsync(userPrompt, systemPrompt);
+        _logger.LogInformation("RAW AI RESPONSE: {Response}", firstResponse);
 
         var match = ToolCallRegex.Match(firstResponse);
         if (!match.Success) return firstResponse;
@@ -55,16 +56,38 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 
     private (string toolName, string queryValue) ParseAndCorrectToolCall(Match match)
     {
-        var toolName = match.Groups[1].Value;
+        var aiGeneratedName = match.Groups[1].Value;
         var queryValue = match.Groups[2].Value.Trim().Trim('"', '\'');
-        
-        return (toolName, queryValue);
+
+        var validTools = _mcpClient.GetKnownTools();
+
+        if (!validTools.Any() || validTools.Contains(aiGeneratedName))
+        {
+            return (aiGeneratedName, queryValue);
+        }
+
+        var bestMatch = validTools
+            .Select(validName => new 
+            { 
+                Name = validName, 
+                Distance = StringDistance.Calculate(aiGeneratedName, validName) 
+            })
+            .OrderBy(x => x.Distance)
+            .First();
+
+        _logger.LogWarning("Auto-Correcting Tool: '{Bad}' -> '{Good}' (Distance: {Dist})", 
+            aiGeneratedName, bestMatch.Name, bestMatch.Distance);
+
+        return (bestMatch.Name, queryValue);
     }
 
     private string BuildSystemPrompt(string toolsDescription)
     {
+        var now = DateTime.Now.ToString("F", System.Globalization.CultureInfo.InvariantCulture);
+        
         return $"""
-                You are a security assistant. Current time: {DateTime.Now:f}.
+                You are a visitor management assistant connected to a real-time system. Current time: {now}.
+                (Use this EXACT time/date for all user questions like "what day is it" or "what time is it").
 
                 AVAILABLE TOOLS:
                 {toolsDescription}

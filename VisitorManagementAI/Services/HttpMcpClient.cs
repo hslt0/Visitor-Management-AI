@@ -8,6 +8,7 @@ public interface IMcpClient
 {
     Task<string> GetToolsDescriptionAsync();
     Task<string> CallToolAsync(string toolName, string queryValue, int siteId);
+    List<string> GetKnownTools();
 }
 
 public class HttpMcpClient : IMcpClient
@@ -15,6 +16,7 @@ public class HttpMcpClient : IMcpClient
     private readonly HttpClient _httpClient;
     private readonly ILogger<HttpMcpClient> _logger;
     private readonly string _mcpUrl;
+    private List<string> _validToolNames = [];
     
     private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
@@ -51,12 +53,14 @@ public class HttpMcpClient : IMcpClient
 
             var result = JsonSerializer.Deserialize<JsonRpcResponse<McpListToolsResult>>(jsonString, _jsonOptions);
             
-            if (result?.Result?.Tools == null) return string.Empty;
+            if (result?.Result.Tools == null) return string.Empty;
+
+            _validToolNames = result.Result.Tools.Select(t => t.Name).ToList();
 
             var sb = new System.Text.StringBuilder();
             foreach (var tool in result.Result.Tools)
             {
-                var paramName = tool.InputSchema?.Properties?.Keys
+                var paramName = tool.InputSchema.Properties.Keys
                     .FirstOrDefault(k => !k.Equals("siteId", StringComparison.OrdinalIgnoreCase)) ?? "query";
 
                 sb.AppendLine($"- {tool.Name}({paramName}: string): {tool.Description}");
@@ -107,7 +111,7 @@ public class HttpMcpClient : IMcpClient
                 return $"Error: {result.Error.Message}";
             }
             
-            var text = result?.Result?.Content?.FirstOrDefault()?.Text ?? "No data returned.";
+            var text = result?.Result.Content.FirstOrDefault()?.Text ?? "No data returned.";
             _logger.LogInformation("Tool returned: {Text}", text);
             
             return text;
@@ -119,6 +123,11 @@ public class HttpMcpClient : IMcpClient
         }
     }
 
+    public List<string> GetKnownTools()
+    {
+        return _validToolNames;
+    }
+
     private string ExtractJsonFromSse(string rawContent)
     {
         if (rawContent.TrimStart().StartsWith("{"))
@@ -126,7 +135,7 @@ public class HttpMcpClient : IMcpClient
             return rawContent;
         }
 
-        var lines = rawContent.Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        var lines = rawContent.Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
 
         foreach (var line in lines)
         {
