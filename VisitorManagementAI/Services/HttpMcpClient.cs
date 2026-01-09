@@ -6,7 +6,8 @@ namespace VisitorManagementAI.Services;
 
 public interface IMcpClient
 {
-    Task<string> GetToolsDescriptionAsync();
+    Task<List<McpTool>> GetToolsAsync();
+
     Task<string> CallToolAsync(string toolName, string queryValue, int siteId);
     List<string> GetKnownTools();
 }
@@ -32,13 +33,13 @@ public class HttpMcpClient : IMcpClient
         _mcpUrl = baseUrl?.TrimEnd('/') + "/api/mcp";
     }
 
-    public async Task<string> GetToolsDescriptionAsync()
+    public async Task<List<McpTool>> GetToolsAsync()
     {
         try
         {
             var request = new JsonRpcRequest("tools/list", new { }, 1);
             
-            _logger.LogInformation("Requesting tools from {Url}", _mcpUrl);
+            _logger.LogInformation("Requesting tools JSON from {Url}", _mcpUrl);
 
             var response = await _httpClient.PostAsJsonAsync(_mcpUrl, request);
             var rawContent = await response.Content.ReadAsStringAsync();
@@ -46,32 +47,41 @@ public class HttpMcpClient : IMcpClient
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogError("Failed to list tools. Status: {Status}", response.StatusCode);
-                return string.Empty;
+                return [];
             }
 
             var jsonString = ExtractJsonFromSse(rawContent);
 
             var result = JsonSerializer.Deserialize<JsonRpcResponse<McpListToolsResult>>(jsonString, _jsonOptions);
             
-            if (result?.Result.Tools == null) return string.Empty;
+            if (result?.Result.Tools == null) return [];
 
             _validToolNames = result.Result.Tools.Select(t => t.Name).ToList();
 
-            var sb = new System.Text.StringBuilder();
-            foreach (var tool in result.Result.Tools)
-            {
-                var paramName = tool.InputSchema.Properties.Keys
-                    .FirstOrDefault(k => !k.Equals("siteId", StringComparison.OrdinalIgnoreCase)) ?? "query";
-
-                sb.AppendLine($"- {tool.Name}({paramName}: string): {tool.Description}");
-            }
-            return sb.ToString();
+            return result.Result.Tools;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error fetching tools instructions");
-            return string.Empty;
+            _logger.LogError(ex, "Error fetching tools");
+            return new List<McpTool>();
         }
+    }
+
+    public async Task<string> GetToolsDescriptionAsync()
+    {
+        var tools = await GetToolsAsync();
+        
+        if (!tools.Any()) return string.Empty;
+
+        var sb = new System.Text.StringBuilder();
+        foreach (var tool in tools)
+        {
+            var paramName = tool.InputSchema.Properties.Keys
+                .FirstOrDefault(k => !k.Equals("siteId", StringComparison.OrdinalIgnoreCase)) ?? "query";
+
+            sb.AppendLine($"- {tool.Name}({paramName}: string): {tool.Description}");
+        }
+        return sb.ToString();
     }
 
     public async Task<string> CallToolAsync(string toolName, string queryValue, int siteId)

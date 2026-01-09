@@ -19,7 +19,14 @@ public class VisitorTools(AppDbContext db)
                         (c.VisitorVehicleRegistrationPlate == query || c.VisitorName.Contains(query)))
             .OrderByDescending(c => c.CheckinTimestamp)
             .Take(5)
-            .Select(c => new { c.VisitorName, c.VisitorCustomOne, c.CheckinTimestamp, c.VisitorVehicleRegistrationPlate })
+            .Select(c => new 
+            { 
+                c.VisitorName, 
+                c.VisitorCustomOne, 
+                c.CheckinTimestamp, 
+                c.CheckoutTimestamp,
+                c.VisitorVehicleRegistrationPlate 
+            })
             .ToListAsync();
 
         return visitors.Any() ? JsonSerializer.Serialize(visitors) : "No visitors found for this query.";
@@ -32,7 +39,7 @@ public class VisitorTools(AppDbContext db)
             .Where(c => c.SiteId == siteId && c.VisitorCustomOne == unit)
             .OrderByDescending(c => c.CheckinTimestamp)
             .Take(10)
-            .Select(c => new { c.VisitorName, c.VisitorCustomOne, c.CheckinTimestamp })
+            .Select(c => new { c.VisitorName, c.VisitorCustomOne, c.CheckinTimestamp, c.CheckoutTimestamp })
             .ToListAsync();
 
         return visitors.Any() ? JsonSerializer.Serialize(visitors) : $"No one found in unit {unit}.";

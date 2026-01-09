@@ -1,6 +1,7 @@
 ﻿using System.Text;
-using System.Text.RegularExpressions;
+using System.Text.Json;
 using Microsoft.ML.OnnxRuntimeGenAI;
+using VisitorManagementAI.Models;
 using VisitorManagementAI.Utilities;
 
 namespace VisitorManagementAI.Services;
@@ -17,8 +18,6 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
     private readonly IMcpClient _mcpClient;
     private readonly ILogger<OnnxVisitorQueryService> _logger;
 
-    private static readonly Regex ToolCallRegex = new(@"\[CALL:\s*([a-zA-Z0-9_]+)\s*\(\s*(?:.*?=)?\s*(.*)\s*\)\]", RegexOptions.Compiled);
-
     public OnnxVisitorQueryService(IConfiguration config, IMcpClient mcpClient, ILogger<OnnxVisitorQueryService> logger)
     {
         _mcpClient = mcpClient;
@@ -31,88 +30,124 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
     public async Task<string> ChatAsync(string userPrompt, int siteId)
     {
         var now = DateTime.Now.ToString("F", System.Globalization.CultureInfo.InvariantCulture);
-        
-        var toolsDescription = await _mcpClient.GetToolsDescriptionAsync();
-        
-        _logger.LogInformation("Tools description AI got: " + toolsDescription);
+        var tools = await _mcpClient.GetToolsAsync();
 
-        var systemPrompt = BuildSystemPrompt(toolsDescription, now);
+        var systemPrompt = BuildNativeSystemPrompt(tools, now);
         
-        _logger.LogInformation("System prompt: " + systemPrompt);
+        _logger.LogInformation("System prompt with native tools generated.");
 
         var firstResponse = await RunInferenceAsync(userPrompt, systemPrompt);
-        _logger.LogInformation("RAW AI RESPONSE: {Response}", firstResponse);
+        _logger.LogInformation("RAW AI RESPONSE: >>> {Response} <<<", firstResponse);
 
-        var match = ToolCallRegex.Match(firstResponse);
-        if (!match.Success) return firstResponse;
+        var (toolName, queryValue) = ParseNativeToolOutput(firstResponse);
 
-        var (toolName, queryValue) = ParseAndCorrectToolCall(match);
+        if (string.IsNullOrEmpty(toolName))
+        {
+            return firstResponse;
+        }
         
+        var validTools = _mcpClient.GetKnownTools();
+        if (validTools.Any() && !validTools.Contains(toolName))
+        {
+             var bestMatch = validTools
+                .Select(validName => new { Name = validName, Distance = AiUtilities.CalculateDistance(toolName, validName) })
+                .OrderBy(x => x.Distance)
+                .First();
+             toolName = bestMatch.Name;
+        }
+
         _logger.LogInformation("AI requesting tool: {Tool} with query: {Query}", toolName, queryValue);
 
         var rawJsonResult = await _mcpClient.CallToolAsync(toolName, queryValue, siteId);
-        
         var humanReadableData = AiUtilities.FormatJsonForAi(rawJsonResult);
 
         var finalPrompt = $"""
                            Current System Time: {now}
-
-                           Original Question: "{userPrompt}"
-                           Database Data:
-                           {humanReadableData}
-
-                           Instruction: Summarize the data naturally for the user. 
-                           Use the 'Current System Time' to correctly say 'today', 'yesterday', or 'last week'.
+                           User Question: "{userPrompt}"
+                           Data: {humanReadableData}
+                           Instruction: Summarize naturally.
                            """;
         
-        return await RunInferenceAsync(finalPrompt, "You are a helpful security assistant.");
+        return await RunInferenceAsync(finalPrompt, "You are a helpful assistant.");
     }
 
-    private (string toolName, string queryValue) ParseAndCorrectToolCall(Match match)
+    private (string toolName, string queryValue) ParseNativeToolOutput(string response)
     {
-        var aiGeneratedName = match.Groups[1].Value;
-        var queryValue = match.Groups[2].Value.Trim().Trim('"', '\'');
-
-        var validTools = _mcpClient.GetKnownTools();
-
-        if (!validTools.Any() || validTools.Contains(aiGeneratedName))
+        try
         {
-            return (aiGeneratedName, queryValue);
+            var jsonStart = response.IndexOf('[');
+            var jsonEnd = response.LastIndexOf(']');
+
+            if (jsonStart == -1 || jsonEnd == -1 || jsonEnd < jsonStart)
+                return (string.Empty, string.Empty);
+
+            var json = response.Substring(jsonStart, jsonEnd - jsonStart + 1);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+                return (string.Empty, string.Empty);
+
+            var toolObj = root[0];
+            
+            if (!toolObj.TryGetProperty("name", out var nameProp))
+                return (string.Empty, string.Empty);
+
+            var toolName = nameProp.GetString();
+            var queryValue = string.Empty;
+
+            if (toolObj.TryGetProperty("parameters", out var paramsProp))
+            {
+                if (paramsProp.TryGetProperty("Properties", out var propsProp))
+                {
+                    queryValue = ExtractValue(propsProp);
+                }
+                else
+                {
+                    queryValue = ExtractValue(paramsProp);
+                }
+            }
+
+            return (toolName ?? string.Empty, queryValue);
         }
-
-        var bestMatch = validTools
-            .Select(validName => new 
-            { 
-                Name = validName, 
-                Distance = AiUtilities.CalculateDistance(aiGeneratedName, validName) 
-            })
-            .OrderBy(x => x.Distance)
-            .First();
-
-        _logger.LogWarning("Auto-Correcting Tool: '{Bad}' -> '{Good}' (Distance: {Dist})", 
-            aiGeneratedName, bestMatch.Name, bestMatch.Distance);
-
-        return (bestMatch.Name, queryValue);
+        catch
+        {
+            return (string.Empty, string.Empty);
+        }
     }
 
-    private string BuildSystemPrompt(string toolsDescription, string now)
+    private string ExtractValue(JsonElement element)
     {
+        if (element.TryGetProperty("query", out var q)) return q.GetString() ?? "";
+        if (element.TryGetProperty("unit", out var u)) return u.GetString() ?? "";
+        
+        foreach (var prop in element.EnumerateObject())
+        {
+            if (prop.Value.ValueKind == JsonValueKind.String)
+                return prop.Value.GetString() ?? "";
+        }
+        return "";
+    }
+
+    private string BuildNativeSystemPrompt(List<McpTool> tools, string now)
+    {
+        var toolsForAi = tools.Select(t => new 
+        {
+            name = t.Name,
+            description = t.Description,
+            parameters = t.InputSchema
+        });
+
+        var jsonTools = JsonSerializer.Serialize(toolsForAi, new JsonSerializerOptions { WriteIndented = false });
+
         return $"""
                 You are a visitor management assistant connected to a real-time system. Current time: {now}.
-                (Use this EXACT time/date for all user questions like "what day is it" or "what time is it").
-
-                AVAILABLE TOOLS:
-                {toolsDescription}
-
-                CRITICAL RULES:
-                1. USE ONLY THE EXACT TOOL NAMES from the list above.
-                2. The tool for searching visitors is 'find_visitor'.
-                3. The tool for checking unit residents is 'get_unit_visitors'.
-                4. NEVER invent names like 'check_unit_members'.
                 
-                EXAMPLES:
-                - User: "Who is in unit 505?" -> Assistant: [CALL: get_unit_visitors(unit="505")]
-                - User: "Find Alex" -> Assistant: [CALL: find_visitor(query="Alex")]
+                <|tool|>
+                {jsonTools}
+                <|/tool|>
+
+                If the user asks a question that requires external data, call the appropriate tool.
                 """;
     }
 
