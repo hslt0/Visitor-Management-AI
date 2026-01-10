@@ -3,6 +3,4 @@ obj/
 /packages/
 riderModule.iml
 /_ReSharper.Caches/
-AI/
-!AI/.gitkeep
-!AI/README.md
+Phi-4-mini-cpu/
