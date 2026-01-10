@@ -6,30 +6,35 @@ Layout = null;
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Visitor AI Chat</title>
+    <title>Visitor AI Chat (Tenant Isolation Demo)</title>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 
     <style>
         body { font-family: system-ui, -apple-system, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; background: #1e1e1e; color: #d4d4d4; }
 
+        #top-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; background: #252526; padding: 1rem; border-radius: 6px; border: 1px solid #333; }
+        .control-group { display: flex; align-items: center; gap: 10px; }
+        label { font-weight: bold; color: #9cdcfe; }
+        select { padding: 0.5rem; background: #3c3c3c; color: white; border: 1px solid #333; border-radius: 4px; outline: none; cursor: pointer; }
+        select:focus { border-color: #007acc; }
+
+        #clear-btn { background: #3c3c3c; border: 1px solid #555; font-size: 0.8rem; padding: 0.4rem 0.8rem; }
+        #clear-btn:hover { background: #444; }
+
         #chat-box { height: 500px; border: 1px solid #333; overflow-y: auto; padding: 1rem; margin-bottom: 1rem; background: #252526; border-radius: 6px; }
 
         .message { margin-bottom: 0.8rem; padding: 0.6rem 1rem; border-radius: 4px; max-width: 85%; line-height: 1.5; word-wrap: break-word; }
         .user { background: #007acc; color: white; margin-left: auto; text-align: right; }
-        .ai { background: #3c3c3c; color: #e0e0e0; margin-right: auto; }
+        .ai { background: #3c3c3c; color: #e0e0e0; margin-right: auto; border: 1px solid #444; }
 
         .ai p { margin: 0 0 10px 0; }
         .ai p:last-child { margin-bottom: 0; }
-
-        .ai pre { background: #1e1e1e; padding: 10px; border-radius: 4px; overflow-x: auto; border: 1px solid #444; }
+        .ai pre { background: #1e1e1e; padding: 10px; border-radius: 4px; overflow-x: auto; border: 1px solid #444; margin-top: 5px; }
         .ai code { font-family: 'Consolas', 'Monaco', monospace; background: #2d2d2d; padding: 2px 4px; border-radius: 3px; font-size: 0.9em; }
         .ai pre code { background: transparent; padding: 0; border: none; color: #9cdcfe; }
-
         .ai ul, .ai ol { margin: 5px 0 10px 20px; padding: 0; }
         .ai li { margin-bottom: 4px; }
-
         .ai strong { color: #fff; font-weight: 600; }
-        .ai h1, .ai h2, .ai h3 { margin: 10px 0 5px 0; color: #fff; font-size: 1.1em; }
 
         #input-area { display: flex; gap: 0.5rem; }
         input { flex-grow: 1; padding: 0.8rem; border-radius: 4px; border: 1px solid #333; background: #3c3c3c; color: white; outline: none; }
@@ -37,26 +42,63 @@ Layout = null;
         button { padding: 0 1.5rem; background: #0e639c; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
         button:hover { background: #1177bb; }
         button:disabled { background: #444; cursor: not-allowed; }
+
+        .system-msg { text-align: center; color: #666; font-size: 0.8rem; margin: 10px 0; font-style: italic; }
     </style>
 </head>
 <body>
+
 <h2>Visitor AI Offline Console</h2>
+
+<div id="top-bar">
+    <div class="control-group">
+        <label for="tenant-select">Active Context:</label>
+        <select id="tenant-select" onchange="handleTenantChange()">
+            <option value="1001">Company A (Site 1001)</option>
+            <option value="2001">Company B (Site 2001)</option>
+        </select>
+    </div>
+    <button id="clear-btn" onclick="clearChat()">Clear History</button>
+</div>
+
 <div id="chat-box"></div>
+
 <div id="input-area">
     <input type="text" id="user-input" placeholder="Type your query here..." onkeypress="handleEnter(event)">
     <button id="send-btn" onclick="sendMessage()">Send</button>
 </div>
 
 <script>
-    marked.use({
-        breaks: true,
-        gfm: true
-    });
+    marked.use({ breaks: true, gfm: true });
+
+    function handleTenantChange() {
+        const select = document.getElementById('tenant-select');
+        const text = select.options[select.selectedIndex].text;
+        addSystemMessage(`Context switched to: ${text}`);
+    }
+
+    function clearChat() {
+        document.getElementById('chat-box').innerHTML = '';
+        addSystemMessage('Chat history cleared.');
+    }
+
+    function addSystemMessage(text) {
+        const box = document.getElementById('chat-box');
+        const div = document.createElement('div');
+        div.className = 'system-msg';
+        div.innerText = text;
+        box.appendChild(div);
+        box.scrollTop = box.scrollHeight;
+    }
 
     async function sendMessage() {
         const input = document.getElementById('user-input');
         const btn = document.getElementById('send-btn');
+        const siteSelect = document.getElementById('tenant-select');
+
         const text = input.value.trim();
+        const siteId = parseInt(siteSelect.value);
+
         if (!text) return;
 
         addMessage(text, 'user');
@@ -68,7 +110,10 @@ Layout = null;
             const response = await fetch('/api/home/ask', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ prompt: text })
+                body: JSON.stringify({
+                    prompt: text,
+                    siteId: siteId
+                })
             });
 
             if (!response.ok) throw new Error(`API Error: ${response.status}`);
@@ -76,7 +121,7 @@ Layout = null;
             const data = await response.json();
             addMessage(data.answer, 'ai');
         } catch (error) {
-            addMessage('**Error:** Is the model loaded? check console.', 'ai');
+            addMessage('**Error:** Is the backend running? Check console.', 'ai');
             console.error(error);
         } finally {
             input.disabled = false;

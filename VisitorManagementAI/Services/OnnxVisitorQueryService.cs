@@ -8,7 +8,7 @@ namespace VisitorManagementAI.Services;
 
 public interface IVisitorQueryService
 {
-    Task<string> ChatAsync(string userPrompt, int siteId);
+    Task<VisitorQueryResponse> ChatAsync(string userPrompt, int siteId);
 }
 
 public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
@@ -27,7 +27,7 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
         _tokenizer = new Tokenizer(_model);
     }
 
-    public async Task<string> ChatAsync(string userPrompt, int siteId)
+    public async Task<VisitorQueryResponse> ChatAsync(string userPrompt, int siteId)
     {
         var now = DateTime.Now.ToString("F", System.Globalization.CultureInfo.InvariantCulture);
         var tools = await _mcpClient.GetToolsAsync();
@@ -43,7 +43,12 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 
         if (string.IsNullOrEmpty(toolName))
         {
-            return firstResponse;
+            return new VisitorQueryResponse(
+                firstResponse,
+                null,
+                null,
+                DateTime.Now
+                );
         }
         
         var validTools = _mcpClient.GetKnownTools();
@@ -68,7 +73,14 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
                            Instruction: Summarize naturally.
                            """;
         
-        return await RunInferenceAsync(finalPrompt, "You are a helpful assistant.");
+        var finalResponse = await RunInferenceAsync(finalPrompt, "You are a helpful assistant.");
+
+        return new VisitorQueryResponse(
+            finalResponse,
+            rawJsonResult,
+            toolName,
+            DateTime.Now
+            );
     }
 
     private (string toolName, string queryValue) ParseNativeToolOutput(string response)
