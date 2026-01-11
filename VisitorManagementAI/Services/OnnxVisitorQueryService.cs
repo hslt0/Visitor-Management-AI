@@ -6,11 +6,6 @@ using VisitorManagementAI.Utilities;
 
 namespace VisitorManagementAI.Services;
 
-public interface IVisitorQueryService
-{
-    Task<VisitorQueryResponse> ChatAsync(string userPrompt, int siteId);
-}
-
 public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
 {
     private readonly Model _model;
@@ -32,14 +27,14 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
         var now = DateTime.Now.ToString("F", System.Globalization.CultureInfo.InvariantCulture);
         var tools = await _mcpClient.GetToolsAsync();
 
-        var systemPrompt = BuildNativeSystemPrompt(tools, now);
+        var systemPrompt = AiUtilities.BuildNativeSystemPrompt(tools, now);
         
         _logger.LogInformation("System prompt with native tools generated.");
 
         var firstResponse = await RunInferenceAsync(userPrompt, systemPrompt);
         _logger.LogInformation("RAW AI RESPONSE: >>> {Response} <<<", firstResponse);
 
-        var (toolName, queryValue) = ParseNativeToolOutput(firstResponse);
+        var (toolName, arguments) = ParseNativeToolOutput(firstResponse);
 
         if (string.IsNullOrEmpty(toolName))
         {
@@ -61,9 +56,9 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
              toolName = bestMatch.Name;
         }
 
-        _logger.LogInformation("AI requesting tool: {Tool} with query: {Query}", toolName, queryValue);
+        _logger.LogInformation("AI requesting tool: {Tool} with arguments: {Arguments}", toolName, arguments);
 
-        var rawJsonResult = await _mcpClient.CallToolAsync(toolName, queryValue, siteId);
+        var rawJsonResult = await _mcpClient.CallToolAsync(toolName, arguments, siteId);
         var humanReadableData = AiUtilities.FormatJsonForAi(rawJsonResult);
 
         var finalPrompt = $"""
@@ -83,7 +78,7 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
             );
     }
 
-    private (string toolName, string queryValue) ParseNativeToolOutput(string response)
+    private (string, Dictionary<string, object> arguments) ParseNativeToolOutput(string response)
     {
         try
         {
@@ -91,76 +86,78 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
             var jsonEnd = response.LastIndexOf(']');
 
             if (jsonStart == -1 || jsonEnd == -1 || jsonEnd < jsonStart)
-                return (string.Empty, string.Empty);
+                return (string.Empty, new Dictionary<string, object>());
 
             var json = response.Substring(jsonStart, jsonEnd - jsonStart + 1);
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
             if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
-                return (string.Empty, string.Empty);
+                return (string.Empty, new Dictionary<string, object>());
 
             var toolObj = root[0];
             
             if (!toolObj.TryGetProperty("name", out var nameProp))
-                return (string.Empty, string.Empty);
+                return (string.Empty, new Dictionary<string, object>());
 
             var toolName = nameProp.GetString();
-            var queryValue = string.Empty;
+            
+            var arguments = new Dictionary<string, object>();
 
-            if (toolObj.TryGetProperty("parameters", out var paramsProp))
+            if (toolObj.TryGetProperty("parameters", out var paramsProp)) 
             {
-                if (paramsProp.TryGetProperty("Properties", out var propsProp))
-                {
-                    queryValue = ExtractValue(propsProp);
-                }
-                else
-                {
-                    queryValue = ExtractValue(paramsProp);
-                }
+                // Handle both direct parameters and nested Properties
+                var propsElement = paramsProp.TryGetProperty("Properties", out var propsProp) ? propsProp : paramsProp;
+                arguments = ExtractArguments(propsElement);
             }
-
-            return (toolName ?? string.Empty, queryValue);
+            
+            return (toolName ?? string.Empty, arguments);
         }
         catch
         {
-            return (string.Empty, string.Empty);
+            return (string.Empty, new Dictionary<string, object>());
         }
     }
 
-    private string ExtractValue(JsonElement element)
+    private Dictionary<string, object> ExtractArguments(JsonElement element)
     {
-        if (element.TryGetProperty("query", out var q)) return q.GetString() ?? "";
-        if (element.TryGetProperty("unit", out var u)) return u.GetString() ?? "";
+        var result = new Dictionary<string, object>();
         
+        if (element.ValueKind != JsonValueKind.Object)
+            return result;
+
         foreach (var prop in element.EnumerateObject())
         {
-            if (prop.Value.ValueKind == JsonValueKind.String)
-                return prop.Value.GetString() ?? "";
+            if (prop.Name.Equals("siteId", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            switch (prop.Value.ValueKind)
+            {
+                case JsonValueKind.String:
+                    result[prop.Name] = prop.Value.GetString() ?? "";
+                    break;
+                case JsonValueKind.Number:
+                    if (prop.Value.TryGetInt32(out var i))
+                        result[prop.Name] = i;
+                    else
+                        result[prop.Name] = prop.Value.GetDouble();
+                    break;
+                case JsonValueKind.True:
+                    result[prop.Name] = true;
+                    break;
+                case JsonValueKind.False:
+                    result[prop.Name] = false;
+                    break;
+                case JsonValueKind.Null:
+                    result[prop.Name] = ""; // Handle null as empty string or appropriate default
+                    break;
+                default:
+                    result[prop.Name] = prop.Value.ToString();
+                    break;
+            }
         }
-        return "";
-    }
-
-    private string BuildNativeSystemPrompt(List<McpTool> tools, string now)
-    {
-        var toolsForAi = tools.Select(t => new 
-        {
-            name = t.Name,
-            description = t.Description,
-            parameters = t.InputSchema
-        });
-
-        var jsonTools = JsonSerializer.Serialize(toolsForAi, new JsonSerializerOptions { WriteIndented = false });
-
-        return $"""
-                You are a visitor management assistant connected to a real-time system. Current time: {now}.
-                
-                <|tool|>
-                {jsonTools}
-                <|/tool|>
-
-                If the user asks a question that requires external data, call the appropriate tool.
-                """;
+        
+        return result;
     }
 
     private async Task<string> RunInferenceAsync(string prompt, string systemMessage)

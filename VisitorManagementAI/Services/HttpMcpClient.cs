@@ -4,14 +4,6 @@ using VisitorManagementAI.Models;
 
 namespace VisitorManagementAI.Services;
 
-public interface IMcpClient
-{
-    Task<List<McpTool>> GetToolsAsync();
-
-    Task<string> CallToolAsync(string toolName, string queryValue, int siteId);
-    List<string> GetKnownTools();
-}
-
 public class HttpMcpClient : IMcpClient
 {
     private readonly HttpClient _httpClient;
@@ -67,40 +59,22 @@ public class HttpMcpClient : IMcpClient
         }
     }
 
-    public async Task<string> GetToolsDescriptionAsync()
-    {
-        var tools = await GetToolsAsync();
-        
-        if (!tools.Any()) return string.Empty;
-
-        var sb = new System.Text.StringBuilder();
-        foreach (var tool in tools)
-        {
-            var paramName = tool.InputSchema.Properties.Keys
-                .FirstOrDefault(k => !k.Equals("siteId", StringComparison.OrdinalIgnoreCase)) ?? "query";
-
-            sb.AppendLine($"- {tool.Name}({paramName}: string): {tool.Description}");
-        }
-        return sb.ToString();
-    }
-
-    public async Task<string> CallToolAsync(string toolName, string queryValue, int siteId)
+    public async Task<string> CallToolAsync(string toolName, Dictionary<string, object> arguments, int siteId)
     {
         try
         {
-            var paramName = toolName.Contains("unit", StringComparison.OrdinalIgnoreCase) ? "unit" : "query";
-            
+            var finalArguments = new Dictionary<string, object>(arguments)
+            {
+                { "siteId", siteId }
+            };
+
             var request = new JsonRpcRequest("tools/call", new
             {
                 name = toolName,
-                arguments = new Dictionary<string, object>
-                {
-                    { paramName, queryValue },
-                    { "siteId", siteId }
-                }
+                arguments = finalArguments
             }, 1);
 
-            _logger.LogInformation("Calling tool {Tool} with query {Query}", toolName, queryValue);
+            _logger.LogInformation("Calling tool {Tool} with arguments {Arguments}", toolName, finalArguments);
 
             var response = await _httpClient.PostAsJsonAsync(_mcpUrl, request);
             var rawContent = await response.Content.ReadAsStringAsync();

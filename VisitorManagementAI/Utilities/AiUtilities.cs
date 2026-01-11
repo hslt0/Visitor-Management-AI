@@ -1,6 +1,7 @@
 ﻿using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using VisitorManagementAI.Models;
 
 namespace VisitorManagementAI.Utilities;
 
@@ -87,5 +88,27 @@ public static class AiUtilities
         }
 
         return string.Join(", ", parts);
+    }
+    
+    public static string BuildNativeSystemPrompt(List<McpTool> tools, string now)
+    {
+        var toolsForAi = tools.Select(t => new 
+        {
+            name = t.Name,
+            description = t.Description,
+            parameters = t.InputSchema
+        });
+
+        var jsonTools = JsonSerializer.Serialize(toolsForAi, new JsonSerializerOptions { WriteIndented = false });
+
+        return $"""
+                You are a visitor management assistant connected to a real-time system. Current time: {now}.
+
+                <|tool|>
+                {jsonTools}
+                <|/tool|>
+
+                If the user asks a question that requires external data, call the appropriate tool.
+                """;
     }
 }
