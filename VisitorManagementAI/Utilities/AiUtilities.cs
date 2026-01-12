@@ -5,10 +5,20 @@ using VisitorManagementAI.Models;
 
 namespace VisitorManagementAI.Utilities;
 
+/// <summary>
+/// Provides utility methods for AI operations, including string distance calculation, JSON formatting, and prompt building.
+/// </summary>
 public static class AiUtilities
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
 
+    /// <summary>
+    /// Calculates the Levenshtein distance between two strings.
+    /// Used for fuzzy matching tool names if the AI hallucinates a slightly incorrect name.
+    /// </summary>
+    /// <param name="s">The first string.</param>
+    /// <param name="t">The second string.</param>
+    /// <returns>The Levenshtein distance.</returns>
     public static int CalculateDistance(string? s, string? t)
     {
         var source = s?.ToLowerInvariant().Replace("_", "") ?? string.Empty;
@@ -20,6 +30,7 @@ public static class AiUtilities
         var n = source.Length;
         var m = target.Length;
 
+        // Optimized to use O(m) space instead of O(n*m)
         var prevRow = new int[m + 1];
         var currRow = new int[m + 1];
 
@@ -41,6 +52,12 @@ public static class AiUtilities
         return prevRow[m];
     }
 
+    /// <summary>
+    /// Formats a JSON string into a more human-readable format for AI consumption.
+    /// This helps the AI understand the data better than raw JSON.
+    /// </summary>
+    /// <param name="json">The input JSON string.</param>
+    /// <returns>A formatted string representation of the JSON data.</returns>
     public static string FormatJsonForAi(string json)
     {
         if (string.IsNullOrWhiteSpace(json)) return json;
@@ -76,6 +93,12 @@ public static class AiUtilities
         }
     }
 
+    /// <summary>
+    /// Processes a single JSON object, formatting its properties into a key-value string.
+    /// Filters out 'siteId' and formats dates.
+    /// </summary>
+    /// <param name="element">The JSON element to process.</param>
+    /// <returns>A formatted string of the object's properties.</returns>
     private static string ProcessSingleObject(JsonElement element)
     {
         var sb = new StringBuilder();
@@ -83,6 +106,7 @@ public static class AiUtilities
 
         foreach (var prop in element.EnumerateObject())
         {
+            // Hide siteId from the AI output
             if (prop.Name.Equals("siteId", StringComparison.OrdinalIgnoreCase)) continue;
 
             if (!isFirst) sb.Append(", ");
@@ -90,6 +114,7 @@ public static class AiUtilities
 
             sb.Append(prop.Name).Append(": ");
             
+            // Format dates nicely
             if (prop.Value.ValueKind == JsonValueKind.String && 
                 DateTime.TryParse(prop.Value.GetString(), out var dateValue))
             {
@@ -104,6 +129,13 @@ public static class AiUtilities
         return sb.ToString();
     }
     
+    /// <summary>
+    /// Builds the system prompt for the AI, including the list of available tools.
+    /// Filters out the 'siteId' parameter from tool definitions so the AI doesn't try to provide it.
+    /// </summary>
+    /// <param name="tools">The list of available MCP tools.</param>
+    /// <param name="now">The current system time string.</param>
+    /// <returns>The constructed system prompt.</returns>
     public static string BuildNativeSystemPrompt(List<McpTool> tools, string now)
     {
         var toolsForAi = tools.Select(t => new
@@ -131,10 +163,17 @@ public static class AiUtilities
                 """;
     }
 
+    /// <summary>
+    /// Parses the AI's response to extract the tool name and arguments.
+    /// Handles the specific JSON format the AI is trained to output for tool calls.
+    /// </summary>
+    /// <param name="response">The raw response from the AI.</param>
+    /// <returns>A tuple containing the tool name and a dictionary of arguments.</returns>
     public static (string, Dictionary<string, object> arguments) ParseNativeToolOutput(string response)
     {
         try
         {
+            // Look for JSON array brackets in the response
             var jsonStart = response.IndexOf('[');
             var jsonEnd = response.LastIndexOf(']');
 
@@ -159,6 +198,7 @@ public static class AiUtilities
 
             if (!toolObj.TryGetProperty("parameters", out var paramsProp)) return (toolName ?? string.Empty, arguments);
             
+            // Handle nested "Properties" object if present, otherwise use parameters directly
             var propsElement = paramsProp.TryGetProperty("Properties", out var propsProp) ? propsProp : paramsProp;
             arguments = ExtractArguments(propsElement);
 
@@ -170,6 +210,12 @@ public static class AiUtilities
         }
     }
 
+    /// <summary>
+    /// Extracts arguments from a JSON element into a dictionary.
+    /// Converts JSON types to appropriate C# types (int, double, bool, string).
+    /// </summary>
+    /// <param name="element">The JSON element containing arguments.</param>
+    /// <returns>A dictionary of arguments.</returns>
     private static Dictionary<string, object> ExtractArguments(JsonElement element)
     {
         var result = new Dictionary<string, object>();

@@ -4,6 +4,9 @@ using VisitorManagementAI.Models;
 
 namespace VisitorManagementAI.Services;
 
+/// <summary>
+/// Implementation of <see cref="IMcpClient"/> that communicates with an MCP server over HTTP.
+/// </summary>
 public class HttpMcpClient : IMcpClient
 {
     private readonly HttpClient _httpClient;
@@ -13,6 +16,12 @@ public class HttpMcpClient : IMcpClient
     
     private readonly JsonSerializerOptions _jsonOptions = new() { PropertyNameCaseInsensitive = true };
 
+    /// <summary>
+    /// Initializes a new instance of the <see cref="HttpMcpClient"/> class.
+    /// </summary>
+    /// <param name="httpClient">The HTTP client instance.</param>
+    /// <param name="config">The configuration instance.</param>
+    /// <param name="logger">The logger instance.</param>
     public HttpMcpClient(HttpClient httpClient, IConfiguration config, ILogger<HttpMcpClient> logger)
     {
         _httpClient = httpClient;
@@ -25,10 +34,12 @@ public class HttpMcpClient : IMcpClient
         _mcpUrl = baseUrl?.TrimEnd('/') + "/api/mcp";
     }
 
+    /// <inheritdoc />
     public async Task<List<McpTool>> GetToolsAsync()
     {
         try
         {
+            // Create a JSON-RPC request to list available tools
             var request = new JsonRpcRequest("tools/list", new { }, 1);
             
             _logger.LogInformation("Requesting tools JSON from {Url}", _mcpUrl);
@@ -42,6 +53,7 @@ public class HttpMcpClient : IMcpClient
                 return [];
             }
 
+            // Extract JSON from potential SSE format
             var jsonString = ExtractJsonFromSse(rawContent);
 
             var result = JsonSerializer.Deserialize<JsonRpcResponse<McpListToolsResult>>(jsonString, _jsonOptions);
@@ -59,15 +71,18 @@ public class HttpMcpClient : IMcpClient
         }
     }
 
+    /// <inheritdoc />
     public async Task<string> CallToolAsync(string toolName, Dictionary<string, object> arguments, int siteId)
     {
         try
         {
+            // Inject siteId into arguments for context
             var finalArguments = new Dictionary<string, object>(arguments)
             {
                 { "siteId", siteId }
             };
 
+            // Create a JSON-RPC request to call the specified tool
             var request = new JsonRpcRequest("tools/call", new
             {
                 name = toolName,
@@ -107,11 +122,17 @@ public class HttpMcpClient : IMcpClient
         }
     }
 
+    /// <inheritdoc />
     public List<string> GetKnownTools()
     {
         return _validToolNames;
     }
 
+    /// <summary>
+    /// Extracts the JSON payload from a Server-Sent Events (SSE) formatted string.
+    /// </summary>
+    /// <param name="rawContent">The raw content string.</param>
+    /// <returns>The extracted JSON string.</returns>
     private string ExtractJsonFromSse(string rawContent)
     {
         if (rawContent.TrimStart().StartsWith("{"))
