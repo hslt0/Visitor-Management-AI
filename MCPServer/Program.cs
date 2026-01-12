@@ -1,5 +1,5 @@
 using MCPServer.Data;
-using MCPServer.Models;
+using MCPServer.Tools;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);

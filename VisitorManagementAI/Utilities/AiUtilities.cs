@@ -92,11 +92,18 @@ public static class AiUtilities
     
     public static string BuildNativeSystemPrompt(List<McpTool> tools, string now)
     {
-        var toolsForAi = tools.Select(t => new 
+        var toolsForAi = tools.Select(t =>
         {
-            name = t.Name,
-            description = t.Description,
-            parameters = t.InputSchema
+            var filteredProperties = t.InputSchema.Properties
+                .Where(p => !p.Key.Equals("siteId", StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(p => p.Key, p => p.Value);
+
+            return new
+            {
+                name = t.Name,
+                description = t.Description,
+                parameters = new { Properties = filteredProperties }
+            };
         });
 
         var jsonTools = JsonSerializer.Serialize(toolsForAi, new JsonSerializerOptions { WriteIndented = false });
