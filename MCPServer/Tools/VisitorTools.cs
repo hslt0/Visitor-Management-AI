@@ -11,8 +11,8 @@ public class VisitorTools(AppDbContext db)
 {
     [McpServerTool, Description("Finds visitors by name or plate." +
                                 " Required input param: query is visitor name (e.g., 'Alex') or plate (e.g., 'ABC123') without extra words." +
-                                " Optional input param: daysLookBack is amount of day you need to look back (default is 0, i.e., today) ")]
-    public async Task<string> FindVisitor(string query, int siteId, int daysLookBack = 0)
+                                " Optional input param: daysLookBack is amount of day you need to look back (default is 30, i.e., last month) ")]
+    public async Task<string> FindVisitor(string query, int siteId, int daysLookBack = 30)
     {
         var date = DateTime.Today.AddDays(-daysLookBack);
         
@@ -40,8 +40,8 @@ public class VisitorTools(AppDbContext db)
 
     [McpServerTool, Description("Lists all visitors who visited a specific unit." +
                                 " Required input param: unit (e.g., ABC, 101)." +
-                                " Optional input param: daysLookBack is amount of day you need to look back (default is 0, i.e., today)")]
-    public async Task<string> GetUnitVisitors(string unit, int siteId, int daysLookBack = 0)
+                                " Optional input param: daysLookBack is amount of day you need to look back (default is 30, i.e., last month)")]
+    public async Task<string> GetUnitVisitors(string unit, int siteId, int daysLookBack = 30)
     {
         var date = DateTime.Today.AddDays(-daysLookBack);
             
