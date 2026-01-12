@@ -36,7 +36,7 @@ Cross-tenant data leakage is prevented at the architectural level. The AI model 
 To download the model, install the **Hugging Face CLI** via PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm [https://hf.co/cli/install.ps1](https://hf.co/cli/install.ps1) | iex"
+powershell -ExecutionPolicy ByPass -c "irm https://hf.co/cli/install.ps1 | iex"
 
 ```
 
