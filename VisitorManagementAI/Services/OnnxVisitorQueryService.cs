@@ -1,5 +1,4 @@
 ﻿using System.Text;
-using System.Text.Json;
 using Microsoft.ML.OnnxRuntimeGenAI;
 using VisitorManagementAI.Models;
 using VisitorManagementAI.Utilities;
@@ -34,7 +33,7 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
         var firstResponse = await RunInferenceAsync(userPrompt, systemPrompt);
         _logger.LogInformation("RAW AI RESPONSE: >>> {Response} <<<", firstResponse);
 
-        var (toolName, arguments) = ParseNativeToolOutput(firstResponse);
+        var (toolName, arguments) = AiUtilities.ParseNativeToolOutput(firstResponse);
 
         if (string.IsNullOrEmpty(toolName))
         {
@@ -77,89 +76,7 @@ public class OnnxVisitorQueryService : IVisitorQueryService, IDisposable
             DateTime.Now
             );
     }
-
-    private (string, Dictionary<string, object> arguments) ParseNativeToolOutput(string response)
-    {
-        try
-        {
-            var jsonStart = response.IndexOf('[');
-            var jsonEnd = response.LastIndexOf(']');
-
-            if (jsonStart == -1 || jsonEnd == -1 || jsonEnd < jsonStart)
-                return (string.Empty, new Dictionary<string, object>());
-
-            var json = response.Substring(jsonStart, jsonEnd - jsonStart + 1);
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
-                return (string.Empty, new Dictionary<string, object>());
-
-            var toolObj = root[0];
-            
-            if (!toolObj.TryGetProperty("name", out var nameProp))
-                return (string.Empty, new Dictionary<string, object>());
-
-            var toolName = nameProp.GetString();
-            
-            var arguments = new Dictionary<string, object>();
-
-            if (toolObj.TryGetProperty("parameters", out var paramsProp)) 
-            {
-                // Handle both direct parameters and nested Properties
-                var propsElement = paramsProp.TryGetProperty("Properties", out var propsProp) ? propsProp : paramsProp;
-                arguments = ExtractArguments(propsElement);
-            }
-            
-            return (toolName ?? string.Empty, arguments);
-        }
-        catch
-        {
-            return (string.Empty, new Dictionary<string, object>());
-        }
-    }
-
-    private Dictionary<string, object> ExtractArguments(JsonElement element)
-    {
-        var result = new Dictionary<string, object>();
-        
-        if (element.ValueKind != JsonValueKind.Object)
-            return result;
-
-        foreach (var prop in element.EnumerateObject())
-        {
-            if (prop.Name.Equals("siteId", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            switch (prop.Value.ValueKind)
-            {
-                case JsonValueKind.String:
-                    result[prop.Name] = prop.Value.GetString() ?? "";
-                    break;
-                case JsonValueKind.Number:
-                    if (prop.Value.TryGetInt32(out var i))
-                        result[prop.Name] = i;
-                    else
-                        result[prop.Name] = prop.Value.GetDouble();
-                    break;
-                case JsonValueKind.True:
-                    result[prop.Name] = true;
-                    break;
-                case JsonValueKind.False:
-                    result[prop.Name] = false;
-                    break;
-                case JsonValueKind.Null:
-                    result[prop.Name] = ""; // Handle null as empty string or appropriate default
-                    break;
-                default:
-                    result[prop.Name] = prop.Value.ToString();
-                    break;
-            }
-        }
-        
-        return result;
-    }
-
+    
     private async Task<string> RunInferenceAsync(string prompt, string systemMessage)
     {
         return await Task.Run(() =>

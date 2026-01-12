@@ -118,4 +118,86 @@ public static class AiUtilities
                 If the user asks a question that requires external data, call the appropriate tool.
                 """;
     }
+    
+    public static (string, Dictionary<string, object> arguments) ParseNativeToolOutput(string response)
+    {
+        try
+        {
+            var jsonStart = response.IndexOf('[');
+            var jsonEnd = response.LastIndexOf(']');
+
+            if (jsonStart == -1 || jsonEnd == -1 || jsonEnd < jsonStart)
+                return (string.Empty, new Dictionary<string, object>());
+
+            var json = response.Substring(jsonStart, jsonEnd - jsonStart + 1);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Array || root.GetArrayLength() == 0)
+                return (string.Empty, new Dictionary<string, object>());
+
+            var toolObj = root[0];
+            
+            if (!toolObj.TryGetProperty("name", out var nameProp))
+                return (string.Empty, new Dictionary<string, object>());
+
+            var toolName = nameProp.GetString();
+            
+            var arguments = new Dictionary<string, object>();
+
+            if (toolObj.TryGetProperty("parameters", out var paramsProp)) 
+            {
+                // Handle both direct parameters and nested Properties
+                var propsElement = paramsProp.TryGetProperty("Properties", out var propsProp) ? propsProp : paramsProp;
+                arguments = ExtractArguments(propsElement);
+            }
+            
+            return (toolName ?? string.Empty, arguments);
+        }
+        catch
+        {
+            return (string.Empty, new Dictionary<string, object>());
+        }
+    }
+
+    private static Dictionary<string, object> ExtractArguments(JsonElement element)
+    {
+        var result = new Dictionary<string, object>();
+        
+        if (element.ValueKind != JsonValueKind.Object)
+            return result;
+
+        foreach (var prop in element.EnumerateObject())
+        {
+            if (prop.Name.Equals("siteId", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            switch (prop.Value.ValueKind)
+            {
+                case JsonValueKind.String:
+                    result[prop.Name] = prop.Value.GetString() ?? "";
+                    break;
+                case JsonValueKind.Number:
+                    if (prop.Value.TryGetInt32(out var i))
+                        result[prop.Name] = i;
+                    else
+                        result[prop.Name] = prop.Value.GetDouble();
+                    break;
+                case JsonValueKind.True:
+                    result[prop.Name] = true;
+                    break;
+                case JsonValueKind.False:
+                    result[prop.Name] = false;
+                    break;
+                case JsonValueKind.Null:
+                    result[prop.Name] = "";
+                    break;
+                default:
+                    result[prop.Name] = prop.Value.ToString();
+                    break;
+            }
+        }
+        
+        return result;
+    }
 }
